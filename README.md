@@ -1,8 +1,182 @@
-# MySQL 自动化运维 Shell 脚本集
+# MySQL 自动化运维脚本集
 
-本目录包含从 dbops (Ansible 版本) 转换而来的 Shell 脚本，用于 MySQL 自动化部署、高可用和备份恢复。
+[![MySQL Version](https://img.shields.io/badge/MySQL-8.0%2B%20%7C%205.7+-blue.svg)](https://dev.mysql.com/doc/refman/8.0/en/)
+[![Platform](https://img.shields.io/badge/Platform-Linux-red.svg)](https://www.redhat.com/en/technologies/linux-systems/enterprise-linux)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/wangzhenye2019/mysql-scripts?style=social)](https://github.com/wangzhenye2019/mysql-scripts)
+[![Auto-Deployment](https://img.shields.io/badge/Type-Binary%20Installation-orange.svg)](#快速开始)
+[![Security](https://img.shields.io/badge/Security-Production%20Ready-red.svg)](#安全警告)
 
+> 生产级 MySQL 自动化部署、高可用与备份恢复解决方案
+> 
 > 源项目: [dbops/mysql_ansible](https://github.com/yml/workspace/01_Projects/dbops)
+
+---
+
+## 核心特性
+
+- **Binary Installation** - 无需依赖发行版包管理器，直接部署官方二进制包
+- **Production Hardening** - 生产级安全加固（密码策略、权限最小化、审计日志）
+- **Performance Tuning** - 基于服务器规格的自动化参数调优（Buffer Pool、Threads 等）
+- **Multi-Architecture** - 支持单节点、主从复制、MGR、Keepalived、MHA 等多种架构
+- **Backup & Recovery** - Xtrabackup 物理备份，支持全量+增量、定时清理
+- **Health Monitoring** - 多维度健康检测 + 自动故障自愈 + 告警通知
+
+---
+
+## 脚本矩阵
+
+| 类别 | 脚本文件 | 功能描述 | Ansible 源 | 技术要点 |
+|------|----------|----------|------------|----------|
+| **部署** | `mysql_install_single.sh` | 单节点安装 | `single_node.yml` | Binary 部署、目录规范、基础参数 |
+| **部署** | `mysql_install_master_slave.sh` | 主从复制 | `master_slave.yml` | GTID 配置、复制安全、延迟监控 |
+| **高可用** | `mysql_install_mgr.sh` | MGR 集群 | `mgr.yml` | 单主/多主模式、仲裁选主 |
+| **高可用** | `mysql_install_keepalived.sh` | Keepalived HA | `keepalived_master_slave.yml` | VIP 漂移、心跳检测 |
+| **高可用** | `mysql_install_mha.sh` | MHA 架构 | `mha.yml` | 自动故障转移、零数据丢失 |
+| **备份** | `mysql_backup_restore.sh` | 备份恢复 | `backup_script.yml` | Xtrabackup、流式压缩 |
+| **监控** | `mysql_health_monitor.sh` | 故障自愈 | - | 健康检查、自动重启、告警 |
+
+---
+
+## 快速开始
+
+### 1. 克隆仓库
+
+```bash
+git clone git@github.com:wangzhenye2019/mysql-scripts.git
+cd mysql-scripts/scripts
+```
+
+### 2. 设置权限
+
+```bash
+chmod +x *.sh
+```
+
+### 3. 验证环境（预检）
+
+```bash
+# 生产环境部署前必检项
+./mysql_install_single.sh --pre-check
+
+# 检查项：OS版本、内存、磁盘、网络、依赖
+```
+
+### 4. 执行部署
+
+```bash
+# 单节点安装（默认参数）
+./mysql_install_single.sh
+
+# 指定版本、端口、数据库类型
+./mysql_install_single.sh -v 8.4.6 -p 3306 -t greatsql
+
+# 服务器规格自动匹配
+./mysql_install_single.sh -s 8c16g   # 自动配置 Buffer Pool
+```
+
+---
+
+## 参数配置
+
+### 通用参数
+
+| 参数 | 默认值 | 说明 | 生产建议 |
+|------|--------|------|----------|
+| `-v, --version` | `8.4.6` | MySQL 版本 | 生产环境锁定小版本 |
+| `-p, --port` | `3306` | 服务端口 | 多实例时递增 |
+| `-t, --type` | `mysql` | 数据库类型 | 支持 mysql/percona/greatsql |
+| `-s, --specs` | `auto` | 服务器规格 | auto/4c8g/8c16g/16c32g |
+
+### 高级参数
+
+| 变量 | 默认值 | 说明 | 调优原理 |
+|------|--------|------|----------|
+| `MYSQL_ADMIN_USER` | `admin` | 管理员账户 | 建议禁用 root 远程登录 |
+| `MYSQL_ADMIN_PASSWORD` | `Dbops@8888` | 管理员密码 | **生产环境必须修改** |
+| `MYSQL_DATA_DIR_BASE` | `/database/mysql` | 数据目录 | 建议独立磁盘/挂载点 |
+| `innodb_buffer_pool_size` | **自动计算** | 缓冲池大小 | 建议为可用内存的 70-80% |
+| `max_connections` | **自动计算** | 最大连接数 | 基于服务器规格动态调整 |
+
+### 服务器规格与参数映射
+
+| 规格 | Buffer Pool | max_connections | 适用场景 |
+|------|-------------|-----------------|----------|
+| `4c8g` | 3G | 800 | 开发/测试 |
+| `8c16g` | 10G | 1500 | 小规模生产 |
+| `16c32g` | 22G | 3000 | 中型生产 |
+| `auto` | 内存×0.7 | CPU×150 | 自适应 |
+
+---
+
+## 最佳实践配置
+
+### 1. Buffer Pool 智能调优
+
+```bash
+# 脚本自动计算逻辑
+Available_Mem=$(free -g | awk '/Mem:/ {print $7}')
+Buffer_Pool=$((Available_Mem * 7 / 10))  # 取 70%
+
+# 实际效果：避免 OOM，确保系统仍有足够内存
+```
+
+### 2. 目录结构规范
+
+```
+/database/
+├── mysql/
+│   ├── data/          # 数据文件 (独立分区)
+│   ├── redo/          # Redo 日志 (SSD 推荐)
+│   ├── binlog/        # Binlog (高 IOPS 存储)
+│   ├── tmp/           # 临时文件
+│   └── conf/          # 配置文件
+├── backup/
+│   ├── full/          # 全量备份
+│   └── inc/           # 增量备份
+```
+
+### 3. 安全加固项
+
+- **密码复杂度**: 至少 8 位，含大小写+数字+特殊字符
+- **权限最小化**: 禁止 root 远程登录，使用 admin 日常运维
+- **审计日志**: 开启 `general_log` + `audit_log` 插件
+- **网络隔离**: 仅监听内网 IP，生产环境禁用公网端口
+
+### 4. 性能优化建议
+
+| 参数 | 推荐值 | 场景 |
+|------|--------|------|
+| `innodb_flush_log_at_trx_commit` | 1 | 数据强一致（默认） |
+| `sync_binlog` | 1 | 防止 Binlog 丢失 |
+| `innodb_flush_method` | O_DIRECT | 写入密集型 |
+| `innodb_io_capacity` | 根据 SSD 调整 | 高 IOPS |
+
+---
+
+## 安全警告
+
+> ⚠️ **生产环境部署前必读**
+
+### 部署前检查清单
+
+- [ ] 确认服务器规格与业务负载匹配
+- [ ] 验证数据备份有效性
+- [ ] 规划 VIP、网络段、端口范围
+- [ ] 修改默认密码为强密码
+- [ ] 配置防火墙规则（仅开放业务端口）
+- [ ] 确认 SSH 免密登录已配置（多节点环境）
+
+### 高危操作
+
+| 操作 | 风险等级 | 防护措施 |
+|------|----------|----------|
+| 主从切换 | 🔴 高 | 提前演练，确认数据无延迟 |
+| MGR 重建 | 🔴 高 | 确保所有节点数据一致 |
+| 备份恢复 | 🟠 中 | 先在测试库验证，停止写入 |
+| 参数调整 | 🟠 中 | 在非高峰期执行，观察监控 |
+
+---
 
 ## 架构概览
 
@@ -10,66 +184,39 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    MySQL 自动化运维架构                              │
 ├─────────────────────────────────────────────────────────────────────┤
-│                                                              │
-│  1. 单节点部署  ──────────────────► 单机版 MySQL                 │
+│  1. 单节点部署  ──────────────────► 单机版 MySQL                   │
+│     • Binary 安装                                                  │
+│     • 基础参数调优                                                  │
 │                                                              │
 │  2. 主从复制  ──────────────────► Master-Slave 架构              │
-│     - 读写分离                                               │
-│     - 数据冗余                                                 │
+│     • GTID 模式                                                 │
+│     • 读写分离                                                   │
 │                                                              │
 │  3. MGR 集群  ──────────────────► MySQL Group Replication     │
-│     - 自动选举主库                                              │
-│     - 数据强一致性                                             │
-│     - 单主/多主模式                                            │
+│     • 自动选举主库                                              │
+│     • 数据强一致性                                             │
+│     • 单主/多主模式                                            │
 │                                                              │
 │  4. Keepalived HA  ────────────────► 双主+VIP漂移                │
-│     - 自动故障检测                                             │
-│     - VIP 自动漂移                                             │
+│     • VRRP 协议                                                 │
+│     • VIP 自动漂移                                              │
 │                                                              │
 │  5. MHA  ───────────────────────────► 一主两从+MHA Manager       │
-│     - 自动故障转移                                             │
-│     - 零数据丢失                                              │
+│     • 自动故障转移                                              │
+│     • 零数据丢失                                                │
 │                                                              │
-│  6. 备份恢复  ─────────────────────► Xtrabackup 物理备份         │
-│     - 全量+增量                                               │
-│     - 自动清理                                                │
+│  6. 备份恢复  ─────────────────────► Xtrabackup 物理备份          │
+│     • 全量+增量                                                 │
+│     • 自动清理                                                 │
 │                                                              │
-│  7. 故障自愈  ─────────────────────► 健康检查+自动恢复           │
-│     - 多维度检测                                              │
-│     - 自动重启                                                │
-│     - 告警通知                                               │
-│                                                              │
+│  7. 故障自愈  ─────────────────────► 健康检查+自动恢复             │
+│     • 多维度检测                                                │
+│     • 自动重启                                                 │
+│     • 告警通知                                                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## 脚本列表
-
-### 1. 基础部署
-
-| 脚本 | 说明 | 对应Ansible版本 |
-|------|------|-------------|
-| [mysql_install_single.sh](scripts/mysql_install_single.sh) | 单节点安装 | `single_node.yml` |
-| [mysql_install_master_slave.sh](scripts/mysql_install_master_slave.sh) | 主从复制安装 | `master_slave.yml` |
-
-### 2. 高��用集群
-
-| 脚本 | 说明 | 对应Ansible版本 |
-|------|------|-------------|
-| [mysql_install_mgr.sh](scripts/mysql_install_mgr.sh) | MGR集群安装 | `mgr.yml` |
-| [mysql_install_keepalived.sh](scripts/mysql_install_keepalived.sh) | Keepalived HA | `keepalived_master_slave.yml` |
-| [mysql_install_mha.sh](scripts/mysql_install_mha.sh) | MHA高可用 | `mha.yml` |
-
-### 3. 备份恢复
-
-| 脚本 | 说明 | 对应Ansible版本 |
-|------|------|-------------|
-| [mysql_backup_restore.sh](scripts/mysql_backup_restore.sh) | 备份恢复 | `backup_script.yml` |
-
-### 4. 监控自愈
-
-| 脚本 | 说明 |
-|------|------|
-| [mysql_health_monitor.sh](scripts/mysql_health_monitor.sh) | 故障自愈监控 |
+---
 
 ## 使用示例
 
@@ -80,62 +227,53 @@
 ./mysql_install_single.sh
 
 # 指定版本和端口
-./mysql_install_single.sh -v 8.4.6 -p 3306 -t mysql
-
-# 使用配置文件
-./mysql_install_single.sh -c /path/to/config.ini
+./mysql_install_single.sh -v 8.4.6 -p 3306 -t greatsql -s 8c16g
 ```
 
 ### 2. 主从复制安装
 
 ```bash
-# 配置主从
-./mysql_install_master_slave.sh
-
-# 指定从库
+# 配置主从（环境变量方式）
 export SLAVE_IPS=("192.168.199.132" "192.168.199.133")
 ./mysql_install_master_slave.sh
 ```
 
-### 3. MGR集群安装
+### 3. MGR 集群安装
 
 ```bash
-# 安装单主模式MGR
-./mysql_install_mgr.sh
-
-# 指定节点
+# 单主模式 MGR
 export MGR_HOSTS=("192.168.199.131" "192.168.199.132" "192.168.199.133")
+export MGR_SINGLE_PRIMARY=true
 ./mysql_install_mgr.sh
 ```
 
 ### 4. Keepalived HA
 
 ```bash
-# 安装Keepalived双主
-./mysql_install_keepalived.sh
-
-# 指定VIP
+# 双主 + VIP 漂移
 export WRITE_VIP=192.168.199.200
+export MASTER_IP=192.168.199.131
+export BACKUP_IP=192.168.199.132
 ./mysql_install_keepalived.sh
 ```
 
 ### 5. 备份恢复
 
 ```bash
-# 执行备份
+# 执行全量备份
 ./mysql_backup_restore.sh backup
 
-# 恢复数据
-./mysql_backup_restore.sh restore /path/to/backup.xbstream
+# 增量备份（基于上次全量）
+./mysql_backup_restore.sh backup --incremental
 
 # 查看备份列表
 ./mysql_backup_restore.sh list
 
-# 安装xtrabackup
-./mysql_backup_restore.sh install
+# 恢复数据
+./mysql_backup_restore.sh restore /backup/full/backup.xbstream
 
-# 设置定时任务
-./mysql_backup_restore.sh cron
+# 设置定时任务（每日 02:00 全量）
+./mysql_backup_restore.sh cron --time "0 2 * * *"
 ```
 
 ### 6. 故障自愈监控
@@ -144,128 +282,79 @@ export WRITE_VIP=192.168.199.200
 # 启动监控
 ./mysql_health_monitor.sh start
 
-# 查看状态
-./mysql_health_monitor.sh status
+# 启用告警通知
+export ALERT_WEBHOOK="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+./mysql_health_monitor.sh start --enable-alert
 
-# 手动检测
+# 手动健康检查
 ./mysql_health_monitor.sh check
 
-# 强制自愈
-./mysql_health_monitor.sh heal
-
-# 停止监控
-./mysql_health_monitor.sh stop
+# 查看监控状态
+./mysql_health_monitor.sh status
 ```
 
-## 参数说明
-
-### 通用参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-v, --version` | 8.4.6 | MySQL版本 |
-| `-p, --port` | 3306 | MySQL端口 |
-| `-t, --type` | mysql | 数据库类型(mysql/percona/greatsql) |
-| `-s, --specs` | auto | 服务器规格(auto/4c8g/8c16g) |
-
-### MySQL配置
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| MYSQL_USER | mysql | 运行用户 |
-| MYSQL_ADMIN_USER | admin | 管理用户 |
-| MYSQL_ADMIN_PASSWORD | Dbops@8888 | 管理密码 |
-| MYSQL_DATA_DIR_BASE | /database/mysql | 数据目录 |
-
-### HA配置 (Keepalived)
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| WRITE_VIP | 192.168.199.200 | 写入VIP |
-| MASTER_IP | - | 主节点IP |
-| BACKUP_IP | - | 备节点IP |
-
-### MGR配置
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| MGR_SINGLE_PRIMARY | true | 单主模式 |
-| MGR_PORT | 13306 | MGR通信端口 |
+---
 
 ## 目录结构
 
 ```
 scripts/
-├── mysql_install_single.sh          # 单节点安装
-├── mysql_install_master_slave.sh    # 主从复制
-├── mysql_install_mgr.sh            # MGR集群
-├── mysql_install_keepalived.sh      # Keepalived HA
-├── mysql_install_mha.sh           # MHA高可用
-├── mysql_backup_restore.sh         # 备份恢复
-├── mysql_health_monitor.sh     # 故障自愈
-└── README.md                   # 本文件
+├── mysql_install_single.sh           # 单节点安装
+├── mysql_install_master_slave.sh     # 主从复制
+├── mysql_install_mgr.sh              # MGR 集群
+├── mysql_install_keepalived.sh       # Keepalived HA
+├── mysql_install_mha.sh              # MHA 高可用
+├── mysql_backup_restore.sh           # 备份恢复
+├── mysql_health_monitor.sh           # 故障自愈监控
+└── README.md                         # 本文档
 ```
+
+---
 
 ## 依赖要求
 
 ### 系统要求
 
-- Linux (RHEL/CentOS/Rocky 7+/Ubuntu 18.04+)
-- MySQL 5.7+ / 8.0+ / GreatSQL
-- SSH免密登录(多节点环境)
-- root权限
+| 组件 | 要求 | 说明 |
+|------|------|------|
+| OS | RHEL/CentOS/Rocky 7+ / Ubuntu 18.04+ | 建议使用 Rocky 9 |
+| MySQL | 5.7+ / 8.0+ / GreatSQL | 推荐 8.0.35+ |
+| SSH | 免密登录 | 多节点环境必须 |
+| 权限 | root | 需要安装系统包 |
 
 ### 依赖软件
 
-- MySQL二进制包 (下载到 downloads 目录)
-- Xtrabackup (备份脚本需要)
-- Keepalived (HA脚本需要)
-- MHA Manager (MHA脚本需要)
+- **MySQL 二进制包**: 下载到 `~/downloads/` 目录
+- **Xtrabackup**: 备份脚本依赖（Percona XtraBackup）
+- **Keepalived**: HA 脚本依赖
+- **MHA Manager**: MHA 脚本依赖
 
-### SSH免密登录
+### SSH 免密登录配置
 
 ```bash
-# 生成SSH密钥
+# 生成 SSH 密钥
 ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa
 
-# 复制到所有节点
-ssh-copy-id -o StrictHostKeyChecking=no user@host
+# 复制到所有节点（多节点环境）
+ssh-copy-id -o StrictHostKeyChecking=no user@192.168.199.131
+ssh-copy-id -o StrictHostKeyChecking=no user@192.168.199.132
 ```
 
-## 注意事项
-
-1. **生产环境谨慎**: 首次建议在测试环境验证
-2. **数据备份**: 部署前确保有有效备份
-3. **VIP规划**: 提前规划好VIP和网络
-4. **密码安全**: 生产环境请修改默认密码
-5. **防火墙**: 确保3306端口可访问
-6. **资源规划**: 根据服务器规格调整参数
-
-## 告警配置
-
-配置企业微信/钉钉 webhook:
-
-```bash
-# 环境变量
-export ALERT_WEBHOOK="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
-
-# 启动监控
-./mysql_health_monitor.sh start --enable-alert
-```
+---
 
 ## 故障排查
 
-### 无法连接MySQL
+### 无法连接 MySQL
 
 ```bash
-# 检查进程
+# 检查进程状态
 ps aux | grep mysqld
 
-# 检查端口
+# 检查端口监听
 netstat -tuln | grep 3306
 
-# 检查日志
-tail -f /database/mysql/error.log
+# 查看错误日志
+tail -f /database/mysql/data/error.log
 ```
 
 ### 主从复制异常
@@ -274,26 +363,55 @@ tail -f /database/mysql/error.log
 # 查看复制状态
 mysql -e "SHOW SLAVE STATUS\G"
 
-# 检查错误日志
-tail -f /var/log/mha/app.log
+# 检查 GTID 同步
+mysql -e "SELECT * FROM performance_schema.replication_group_member_stats\G"
 ```
 
-### Keepalived VIP不漂移
+### Keepalived VIP 不漂移
 
 ```bash
-# 检查Keepalived状态
+# 检查 Keepalived 状态
 systemctl status keepalived
 
-# 检查日志
+# 检查 MySQL 检测脚本日志
 tail -f /var/log/keepalived/check_mysql.log
 ```
 
+---
+
+## 路线图 (Roadmap)
+
+- [ ] **MGR 高可用增强**
+  - [ ] 支持多主模式自动切换
+  - [ ] 添加 MGR 脑裂检测与自动恢复
+  - [ ] 集成 Prometheus Exporter
+
+- [ ] **监控集成**
+  - [ ] Grafana Dashboard 模板
+  - [ ] Prometheus + AlertManager 告警规则
+  - [ ] 支持 Prometheus metrics 导出
+
+- [ ] **备份增强**
+  - [ ] 增量备份基于 LSN 自动发现
+  - [ ] 跨机房异地容灾备份
+  - [ ] 备份加密（AES-256）
+
+- [ ] **运维工具**
+  - [ ] 在线参数调优（不重启）
+  - [ ] 慢查询自动分析
+  - [ ] 空间使用分析与预警
+
+---
+
 ## 相关文档
 
-- [Ansible版本源码](https://github.com/yml/workspace/01_Projects/dbops)
-- [MySQL官方文档](https://dev.mysql.com/doc/refman/8.0/en/)
-- [GreatSQL文档](https://docs.greatdb.com/)
-- [Xtrabackup文档](https://www.percona.com/docs/xtrabackup)
+- [MySQL 官方文档](https://dev.mysql.com/doc/refman/8.0/en/)
+- [GreatSQL 文档](https://docs.greatdb.com/)
+- [Percona XtraBackup](https://www.percona.com/software/percona-xtrabackup)
+- [MHA Manager](https://github.com/yoshinorim/mha4mysql-manager)
+- [Ansible 源项目](https://github.com/yml/workspace/01_Projects/dbops)
+
+---
 
 ## License
 
