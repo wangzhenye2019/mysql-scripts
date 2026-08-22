@@ -1,15 +1,15 @@
 # MySQL 自动化运维脚本集
 
 [![MySQL Version](https://img.shields.io/badge/MySQL-8.4%20LTS-blue.svg)](https://dev.mysql.com/doc/refman/8.4/en/)
-[![Platform](https://img.shields.io/badge/Platform-Linux-red.svg)](https://www.redhat.com/en/technologies/linux-systems/enterprise-linux)
+[![Platform](https://img.shields.io/badge/Platform-Debian%2012-red.svg)](https://www.debian.org/releases/bookworm/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/wangzhenye2019/mysql-scripts?style=social)](https://github.com/wangzhenye2019/mysql-scripts)
 [![Auto-Deployment](https://img.shields.io/badge/Type-Binary%20Installation-orange.svg)](#快速开始)
 [![Security](https://img.shields.io/badge/Security-Production%20Ready-red.svg)](#安全警告)
 
-> 面向 **MySQL 8.4 LTS** 的自动化部署、复制、备份恢复与健康检查脚本。
+> 面向 **Debian 12** 的 MySQL 自动化脚本：包括 **MySQL 5.7.44 增强半同步 + Orchestrator + 受控写 VIP** 遗留高可用模块，以及 **MySQL 8.4 InnoDB Cluster + MySQL Shell + MySQL Router** 标准化模块。
 >
-> **重要说明：** 本仓库的单实例、异步复制、备份恢复和健康监控脚本已完成 MySQL 8.4 安全适配；MGR、Keepalived 与 MHA 脚本尚未经过同等强度的生产验证，部署前必须完成隔离环境演练。
+> **重要说明：** 新增的 `mysql57_orchestrator_ha/` 和 `mysql84_innodb_cluster/` 模块分别服务于不同架构，禁止混用。原有单实例、异步复制、备份恢复和健康监控脚本已完成 MySQL 8.4 安全适配；旧 `mysql_install_mgr.sh`、`mysql_install_keepalived.sh` 与 `mysql_install_mha.sh` 不属于新的生产级自动化路径，不能与新模块并行控制同一集群。
 > 
 > 源项目: [dbops/mysql_ansible](https://github.com/yml/workspace/01_Projects/dbops)
 
@@ -34,7 +34,9 @@
 | **部署** | `mysql_install_master_slave.sh` | 主从复制 | `master_slave.yml` | GTID 配置、复制安全、延迟监控 |
 | **高可用** | `mysql_install_mgr.sh` | MGR 集群 | `mgr.yml` | 单主/多主模式、仲裁选主 |
 | **高可用** | `mysql_install_keepalived.sh` | Keepalived HA | `keepalived_master_slave.yml` | VIP 漂移、心跳检测 |
-| **高可用** | `mysql_install_mha.sh` | MHA 架构 | `mha.yml` | 自动故障转移、零数据丢失 |
+| **高可用** | `mysql_install_mha.sh` | 旧 MHA 架构 | `mha.yml` | 仅保留参考，不建议用于新部署 |
+| **Debian 12 / 5.7 HA** | `mysql57_orchestrator_ha/` | GTID 增强半同步、Orchestrator、受控 VIP | - | AFTER_SYNC、写入门禁、fencing hook、故障演练 |
+| **Debian 12 / 8.4 HA** | `mysql84_innodb_cluster/` | 官方 InnoDB Cluster、Shell、Router | - | AdminAPI、Clone、Router metadata 路由 |
 | **备份** | `mysql_backup_restore.sh` | 备份恢复 | `backup_script.yml` | Xtrabackup、流式压缩 |
 | **监控** | `mysql_health_monitor.sh` | 故障自愈 | - | 健康检查、自动重启、告警 |
 
@@ -223,6 +225,24 @@ Buffer_Pool=$((Available_Mem * 7 / 10))  # 取 70%
 ---
 
 ## 使用示例
+
+### Debian 12 高可用模块
+
+完整的架构前置条件、部署顺序和演练清单请见 [Debian 12 HA 运行手册](docs/DEBIAN12_HA_RUNBOOK.md)。简要入口如下：
+
+```bash
+# 5.7.44 遗留高可用：先以权限 0600 创建专用配置，再逐节点准备与预检
+sudo install -d -m 0700 /etc/mysql-scripts
+sudo install -m 0600 config/examples/mysql57_ha.env.example /etc/mysql-scripts/mysql57-ha.env
+sudo mysql57_orchestrator_ha/01_prepare_instance.sh --config /etc/mysql-scripts/mysql57-ha.env
+sudo mysql57_orchestrator_ha/02_configure_lossless_semisync.sh --config /etc/mysql-scripts/mysql57-ha.env --apply --install-guard
+
+# 8.4 标准集群：每个节点预检后，以 AdminAPI 建群并在应用节点 bootstrap Router
+sudo install -m 0600 config/examples/mysql84_innodb_cluster.env.example /etc/mysql-scripts/mysql84-ic.env
+sudo mysql84_innodb_cluster/02_preflight_instance.sh --config /etc/mysql-scripts/mysql84-ic.env --instance ic-1.example.internal:3306
+sudo mysql84_innodb_cluster/03_create_cluster.sh --config /etc/mysql-scripts/mysql84-ic.env --apply --configure-instances
+sudo mysql84_innodb_cluster/04_bootstrap_router.sh --config /etc/mysql-scripts/mysql84-ic.env
+```
 
 ### 1. 单节点安装
 
