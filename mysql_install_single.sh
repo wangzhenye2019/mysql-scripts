@@ -10,10 +10,11 @@ set -euo pipefail
 #######################################
 # 配置参数 (可在配置文件中覆盖)
 #######################################
-MYSQL_VERSION="8.4.6"
-MYSQL_PORT=3306
-DB_TYPE="mysql"                           # mysql, percona, greatsql
-SERVER_SPECS="auto"                       # auto, 4c8g, 8c16g 等
+MYSQL_VERSION="${MYSQL_VERSION:-8.4.6}"
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+DB_TYPE="${DB_TYPE:-mysql}"               # mysql, percona, greatsql
+SERVER_SPECS="${SERVER_SPECS:-auto}"      # auto, 4c8g, 8c16g 等
+MYSQL_SERVER_ID="${MYSQL_SERVER_ID:-$MYSQL_PORT}"  # 多实例/复制拓扑中必须唯一
 
 # 目录配置
 MYSQL_PACKAGES_DIR="../downloads"
@@ -23,9 +24,9 @@ MYSQL_USER="mysql"
 MYSQL_GROUP="mysql"
 
 # 密码配置
-MYSQL_USER_PASSWORD="Dbops@9999"
-MYSQL_ADMIN_USER="admin"
-MYSQL_ADMIN_PASSWORD="Dbops@8888"
+# 密码不得硬编码在脚本中。请通过受限配置文件或环境变量提供 MYSQL_ADMIN_PASSWORD。
+MYSQL_ADMIN_USER="${MYSQL_ADMIN_USER:-admin}"
+MYSQL_ADMIN_PASSWORD="${MYSQL_ADMIN_PASSWORD:-}"
 
 # MySQL配置参数
 MYSQL_BINLOG_FORMAT="row"
@@ -38,8 +39,10 @@ MYSQL_DEFAULT_TIME_ZONE="+8:00"
 USE_WRITE_SET=1
 
 # 功能开关
-FCS_AUTO_DOWNLOAD_MYSQL=true
-FCS_CREATE_MYSQL_FAST_LOGIN=true
+# 生产环境默认禁止从网络下载未校验的二进制包。
+FCS_AUTO_DOWNLOAD_MYSQL="${FCS_AUTO_DOWNLOAD_MYSQL:-false}"
+FCS_CREATE_MYSQL_FAST_LOGIN="${FCS_CREATE_MYSQL_FAST_LOGIN:-false}"
+MYSQL_PACKAGE_SHA256="${MYSQL_PACKAGE_SHA256:-}"
 
 #######################################
 # 内部变量
@@ -154,10 +157,12 @@ prepare_system() {
     log_info "Preparing system environment..."
 
     # 创建mysql用户
+    if ! getent group "$MYSQL_GROUP" >/dev/null; then
+        groupadd --system "$MYSQL_GROUP"
+    fi
     if ! id "$MYSQL_USER" &>/dev/null; then
-        useradd -r -g "$MYSQL_GROUP" -s /sbin/nologin -d /nonexistent "$MYSQL_USER" 2>/dev/null || \
-        useradd -r -g "$MYSQL_GROUP" -s /bin/false -d /nonexistent "$MYSQL_USER"
-        echo "$MYSQL_USER:$MYSQL_USER_PASSWORD" | chpasswd
+        useradd --system --gid "$MYSQL_GROUP" --shell /usr/sbin/nologin --home-dir /nonexistent "$MYSQL_USER" 2>/dev/null || \
+        useradd --system --gid "$MYSQL_GROUP" --shell /bin/false --home-dir /nonexistent "$MYSQL_USER"
         log_info "User $MYSQL_USER created"
     fi
 
@@ -210,14 +215,28 @@ install_mysql() {
         log_info "Downloading from $download_url"
         if [[ "$FCS_AUTO_DOWNLOAD_MYSQL" == "true" ]]; then
             mkdir -p "$MYSQL_PACKAGES_DIR"
-            wget -O "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" "$download_url" --timeout=60 || \
-            curl -L -o "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" "$download_url" --timeout=60 || true
+            if command -v curl >/dev/null 2>&1; then
+                curl --fail --location --proto '=https' --tlsv1.2 \
+                    --connect-timeout 15 --retry 3 --output "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" "$download_url"
+            else
+                wget --https-only --timeout=60 --tries=3 \
+                    -O "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" "$download_url"
+            fi
         fi
+    fi
+
+    if [[ -n "$MYSQL_PACKAGE_SHA256" ]]; then
+        echo "${MYSQL_PACKAGE_SHA256}  ${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" | sha256sum --check --status || {
+            log_error "MySQL package checksum verification failed"
+            return 1
+        }
+    else
+        log_warn "MYSQL_PACKAGE_SHA256 is not set; package integrity has not been independently verified"
     fi
 
     # 解压包
     if [[ -f "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" ]]; then
-        tar -xzf "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" -C /tmp
+        tar --no-same-owner -xzf "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" -C /tmp
         local extracted_dir
         extracted_dir=$(tar -tzf "${MYSQL_PACKAGES_DIR}/${PACKAGE_FILE}" | head -1 | cut -d/ -f1)
 
@@ -284,6 +303,10 @@ generate_my_cnf() {
         innodb_log_buffer_size="32M"
     fi
 
+    local innodb_buffer_pool_instances=$((buffer_pool_size / 1024))
+    [[ $innodb_buffer_pool_instances -lt 1 ]] && innodb_buffer_pool_instances=1
+    [[ $innodb_buffer_pool_instances -gt 64 ]] && innodb_buffer_pool_instances=64
+
     cat > "${my_cnf_dir}/my.cnf" << EOF
 [mysqld]
 # Basic settings
@@ -293,7 +316,7 @@ datadir                             = ${datadir}
 tmpdir                              = ${MYSQL_DATA_DIR_BASE}/tmp
 socket                              = ${SOCKET}
 port                                = ${MYSQL_PORT}
-server_id                           = 1
+server_id                           = ${MYSQL_SERVER_ID}
 character_set_server                  = ${MYSQL_CHARACTER_SET_SERVER}
 pid_file                           = ${datadir}/mysqld.pid
 
@@ -325,11 +348,11 @@ general_log_file               = ${MYSQL_DATA_DIR_BASE}/generallog/general.log
 log_bin                        = ${MYSQL_DATA_DIR_BASE}/binlog/mysql-bin
 binlog_format                  = ${MYSQL_BINLOG_FORMAT}
 binlog_rows_query_log_events   = 1
-log_slave_updates              = 1
+log_replica_updates            = ON
 sync_binlog                    = 1
 binlog_cache_size              = 65536
 binlog_checksum                = CRC32
-expire_logs_days             = 7
+binlog_expire_logs_seconds    = 604800
 
 # GTID settings
 gtid_mode                      = ON
@@ -339,8 +362,7 @@ gtid_executed_compression_period = 1000
 # Relay log
 relay_log                      = ${MYSQL_DATA_DIR_BASE}/relaylog/relay-bin
 relay_log_recovery           = 1
-master_info_repository       = TABLE
-relay_log_info_repository  = TABLE
+# MySQL 8.4 persists replication metadata in tables by default.
 
 # InnoDB settings
 default_storage_engine         = InnoDB
@@ -357,9 +379,7 @@ innodb_write_io_threads = 4
 innodb_buffer_pool_size = ${buffer_pool_size}M
 
 # InnoDB buffer pool instances
-innodb_buffer_pool_instances = $((buffer_pool_size / 1024))
-[[ $innodb_buffer_pool_instances -lt 1 ]] && innodb_buffer_pool_instances=1
-[[ $innodb_buffer_pool_instances -gt 64 ]] && innodb_buffer_pool_instances=64
+innodb_buffer_pool_instances = ${innodb_buffer_pool_instances}
 
 # Performance schema
 performance_schema           = ON
@@ -421,8 +441,8 @@ initialize_datadir() {
     ./bin/mysqld --initialize-insecure \
         --user="$MYSQL_USER" \
         --basedir="$MYSQL_BASE_DIR" \
-        --datadir="$datadir" \
         --defaults-file="${my_cnf_dir}/my.cnf" \
+        --datadir="$datadir" \
         2>&1 | tee -a "$LOG_FILE"
 
     chown -R "$MYSQL_USER:$MYSQL_GROUP" "$datadir"
@@ -450,8 +470,8 @@ Type=forking
 User=${MYSQL_USER}
 Group=${MYSQL_GROUP}
 ExecStart=${MYSQL_BASE_DIR}/bin/mysqld --defaults-file=${my_cnf_dir}/my.cnf --user=${MYSQL_USER} --daemonize
-ExecStop=/bin/kill -HUP \$MAINPID
-Restart=always
+ExecStop=/bin/kill -TERM \$MAINPID
+Restart=on-failure
 RestartSec=10
 
 PrivateTmp=true
@@ -479,19 +499,15 @@ start_mysql() {
     local datadir="${MYSQL_DATA_DIR_BASE}/data/${MYSQL_PORT}"
     local my_cnf_dir="${MYSQL_DATA_DIR_BASE}/config"
 
-    # 启动MySQL
-    if systemctl is-active mysql${MYSQL_PORT} &>/dev/null; then
+    # 统一由 systemd 启动，避免脱离服务管理的孤儿进程。
+    if systemctl is-active --quiet "mysql${MYSQL_PORT}"; then
         log_info "MySQL service already running"
     else
-        "$MYSQL_BASE_DIR/bin/mysqld" \
-            --defaults-file="${my_cnf_dir}/my.cnf" \
-            --user="$MYSQL_USER" \
-            --daemonize
+        systemctl start "mysql${MYSQL_PORT}"
 
-        # 等待启动
         local i=0
         while [[ $i -lt 60 ]]; do
-            if "$MYSQL_BASE_DIR/bin/mysql" -h127.0.0.1 -P$MYSQL_PORT -S"$SOCKET" -e "SELECT 1" &>/dev/null; then
+            if "$MYSQL_BASE_DIR/bin/mysqladmin" --protocol=socket --socket="$SOCKET" --user=root ping &>/dev/null; then
                 break
             fi
             sleep 1
@@ -500,6 +516,7 @@ start_mysql() {
 
         if [[ $i -ge 60 ]]; then
             log_error "MySQL failed to start within 60 seconds"
+            systemctl status "mysql${MYSQL_PORT}" --no-pager || true
             return 1
         fi
     fi
@@ -515,7 +532,7 @@ secure_mysql() {
 
     # 设置root密码
     "$MYSQL_BASE_DIR/bin/mysql" -S"$SOCKET" -uroot --skip-password << EOF
-ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ADMIN_PASSWORD}';
+ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '${MYSQL_ADMIN_PASSWORD}';
 DELETE FROM mysql.user WHERE User='';
 DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test';
@@ -617,6 +634,7 @@ OPTIONS:
     -s, --specs SPECS        Server specs: auto, 4c8g, 8c16g (default: $SERVER_SPECS)
     -c, --config FILE        Use config file
     -d, --debug             Enable debug output
+        --pre-check          Validate prerequisites without installing
 
 EXAMPLES:
     $0 -v 8.0.32 -p 3306 -t mysql
@@ -630,6 +648,11 @@ EOF
 # 主函数
 #######################################
 main() {
+    [[ $EUID -eq 0 ]] || { log_error "This script must run as root"; return 1; }
+    [[ "$MYSQL_PORT" =~ ^[0-9]+$ ]] && (( MYSQL_PORT >= 1 && MYSQL_PORT <= 65535 )) || { log_error "Invalid MySQL port: $MYSQL_PORT"; return 1; }
+    [[ "$DB_TYPE" =~ ^(mysql|percona|greatsql)$ ]] || { log_error "Unsupported DB_TYPE: $DB_TYPE"; return 1; }
+    [[ -n "$MYSQL_ADMIN_PASSWORD" ]] || { log_error "MYSQL_ADMIN_PASSWORD must be set through a secure configuration file or environment variable"; return 1; }
+
     log_info "=========================================="
     log_info "MySQL Single Node Installation Started"
     log_info "=========================================="
@@ -668,6 +691,19 @@ main() {
     log_info "Log file: $LOG_FILE"
 }
 
+# 安全加载配置文件：仅接受当前用户或 root 所有、且不对组和其他用户开放写入/读取权限的文件。
+load_config() {
+    local config_file="$1"
+    [[ -f "$config_file" && -r "$config_file" ]] || { log_error "Configuration file is not readable: $config_file"; return 1; }
+    local config_owner config_mode
+    config_owner=$(stat -c '%u' "$config_file")
+    config_mode=$(stat -c '%a' "$config_file")
+    (( config_owner == 0 || config_owner == EUID )) || { log_error "Configuration file must be owned by root or the invoking user"; return 1; }
+    (( (8#$config_mode & 077) == 0 )) || { log_error "Configuration file must not be accessible by group or others: $config_file"; return 1; }
+    # shellcheck disable=SC1090
+    source "$config_file"
+}
+
 # 解析参数
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -692,12 +728,16 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -c|--config)
-            source "$2"
+            load_config "${2:?missing configuration file}" || exit 1
             shift 2
             ;;
         -d|--debug)
             DEBUG=1
             shift
+            ;;
+        --pre-check)
+            check_os && check_mysql_port && check_package_exists
+            exit $?
             ;;
         *)
             echo "Unknown option: $1"

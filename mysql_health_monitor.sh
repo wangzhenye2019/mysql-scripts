@@ -10,19 +10,19 @@ set -euo pipefail
 #######################################
 # 配置参数
 #######################################
-MYSQL_VERSION="8.4.6"
-MYSQL_PORT=3306
-DB_TYPE="mysql"
+MYSQL_VERSION="${MYSQL_VERSION:-8.4.6}"
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+DB_TYPE="${DB_TYPE:-mysql}"
 
-# MySQL配置
-MYSQL_ADMIN_USER="admin"
-MYSQL_ADMIN_PASSWORD="Dbops@8888"
-MYSQL_USER="mysql"
-MYSQL_GROUP="mysql"
+# MySQL 凭据必须通过受限配置文件或环境变量提供。
+MYSQL_ADMIN_USER="${MYSQL_ADMIN_USER:-admin}"
+MYSQL_ADMIN_PASSWORD="${MYSQL_ADMIN_PASSWORD:-}"
+MYSQL_USER="${MYSQL_USER:-mysql}"
+MYSQL_GROUP="${MYSQL_GROUP:-mysql}"
 
 # 目录配置
-MYSQL_DATA_DIR_BASE="/database/${DB_TYPE}"
-MYSQL_SOFTWARE_DIR="/database/${DB_TYPE}/base/${MYSQL_VERSION}"
+MYSQL_DATA_DIR_BASE="${MYSQL_DATA_DIR_BASE:-/database/${DB_TYPE}}"
+MYSQL_SOFTWARE_DIR="${MYSQL_SOFTWARE_DIR:-/database/${DB_TYPE}/base/${MYSQL_VERSION}}"
 
 # 监控配置
 CHECK_INTERVAL=30                      # 检测间隔(秒)
@@ -47,8 +47,8 @@ ALERT_LOG="${LOG_DIR}/alert.log"
 #######################################
 # 变量
 #######################################
-SOCKET="/tmp/mysql.sock"
-LOCK_FILE="/var/run/mysql_health_monitor.lock"
+SOCKET="${SOCKET:-/tmp/mysql.sock}"
+LOCK_FILE="${LOCK_FILE:-/run/mysql_health_monitor_${MYSQL_PORT}.lock}"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -111,11 +111,8 @@ send_alert() {
 # 检查MySQL进程
 #######################################
 check_process() {
-    if pgrep -x mysqld > /dev/null; then
-        return 0
-    else
-        return 1
-    fi
+    # 始终按 service unit 检查目标端口实例，绝不以 pgrep/pkill 影响同机其他 mysqld。
+    systemctl is-active --quiet "mysql${MYSQL_PORT}"
 }
 
 #######################################
@@ -155,7 +152,7 @@ check_replication() {
         -S"$SOCKET" \
         -u"${MYSQL_ADMIN_USER}" \
         -p"${MYSQL_ADMIN_PASSWORD}" \
-        -e "SHOW SLAVE STATUS\G" 2>/dev/null)
+        -e "SHOW REPLICA STATUS\G" 2>/dev/null)
 
     if [[ -z "$repl_status" ]]; then
         # 非复制模式,返回成功
@@ -163,8 +160,8 @@ check_replication() {
     fi
 
     local io_running sql_running
-    io_running=$(echo "$repl_status" | grep "Slave_IO_Running:" | awk '{print $2}')
-    sql_running=$(echo "$repl_status" | grep "Slave_SQL_Running:" | awk '{print $2}')
+    io_running=$(echo "$repl_status" | awk -F': ' '/Replica_IO_Running:/{print $2}')
+    sql_running=$(echo "$repl_status" | awk -F': ' '/Replica_SQL_Running:/{print $2}')
 
     if [[ "$io_running" == "Yes" ]] && [[ "$sql_running" == "Yes" ]]; then
         return 0
@@ -233,29 +230,15 @@ restart_mysql() {
     local my_cnf="${MYSQL_DATA_DIR_BASE}/config/my.cnf"
     local datadir="${MYSQL_DATA_DIR_BASE}/data/${MYSQL_PORT}"
 
-    # 停止MySQL
+    # 停止MySQL。systemd 停止失败必须显式报错，避免误杀同机其他实例。
     log_info "Stopping MySQL..."
-    systemctl stop mysql${MYSQL_PORT} 2>/dev/null || true
-
-    # 如果进程还存在,强制杀掉
-    if pgrep -x mysqld > /dev/null; then
-        pkill -9 mysqld 2>/dev/null || true
+    if systemctl is-active --quiet "mysql${MYSQL_PORT}"; then
+        systemctl stop "mysql${MYSQL_PORT}" || { log_error "Unable to stop mysql${MYSQL_PORT}"; return 1; }
     fi
-
-    # 等待进程退出
-    sleep 3
-
-    # 删除pid文件
-    rm -f "${datadir}"/*.pid 2>/dev/null || true
-    rm -f "$SOCKET" 2>/dev/null || true
 
     # 启动MySQL
     log_info "Starting MySQL..."
-    systemctl start mysql${MYSQL_PORT} 2>/dev/null || \
-    "${MYSQL_SOFTWARE_DIR}/bin/mysqld" \
-        --defaults-file="$my_cnf" \
-        --user="$MYSQL_USER" \
-        --daemonize
+    systemctl start "mysql${MYSQL_PORT}"
 
     # 等待启动
     local i=0
@@ -269,7 +252,7 @@ restart_mysql() {
             return 0
         fi
         sleep 1
-        ((i++))
+        ((++i))
     done
 
     log_error "Failed to restart MySQL"
@@ -340,46 +323,46 @@ health_check() {
     # 检查1: 进程
     if check_process; then
         log_info "Check Process: PASS"
-        ((checks_passed++))
+        ((++checks_passed))
     else
         log_error "Check Process: FAIL"
-        ((checks_failed++))
+        ((++checks_failed))
     fi
 
     # 检查2: 端口
     if check_port; then
         log_info "Check Port: PASS"
-        ((checks_passed++))
+        ((++checks_passed))
     else
         log_error "Check Port: FAIL"
-        ((checks_failed++))
+        ((++checks_failed))
     fi
 
     # 检查3: 连接
     if check_connection; then
         log_info "Check Connection: PASS"
-        ((checks_passed++))
+        ((++checks_passed))
     else
         log_error "Check Connection: FAIL"
-        ((checks_failed++))
+        ((++checks_failed))
     fi
 
     # 检查4: 复制(如果存在)
     if check_replication; then
         log_info "Check Replication: PASS"
-        ((checks_passed++))
+        ((++checks_passed))
     else
         log_error "Check Replication: FAIL"
-        ((checks_failed++))
+        ((++checks_failed))
     fi
 
     # 检查5: InnoDB状态
     if check_innodb; then
         log_info "Check InnoDB: PASS"
-        ((checks_passed++))
+        ((++checks_passed))
     else
         log_error "Check InnoDB: FAIL"
-        ((checks_failed++))
+        ((++checks_failed))
     fi
 
     if [[ $checks_failed -gt 0 ]]; then
@@ -397,7 +380,7 @@ self_heal() {
     local healed=false
 
     while [[ $attempts -lt $MAX_RESTART_ATTEMPTS ]]; do
-        ((attempts++))
+        ((++attempts))
 
         log_info "Self-healing attempt $attempts/$MAX_RESTART_ATTEMPTS..."
 
@@ -465,6 +448,7 @@ monitor_loop() {
     fi
 
     echo $$ > "$LOCK_FILE"
+    trap 'rm -f "$LOCK_FILE"' EXIT INT TERM
 
     local consecutive_failures=0
 
@@ -479,7 +463,7 @@ monitor_loop() {
             fi
         else
             log_warn "Health check: FAILED"
-            ((consecutive_failures++))
+            ((++consecutive_failures))
 
             # 连续失败3次才触发自愈
             if [[ $consecutive_failures -ge 3 ]]; then
@@ -549,7 +533,7 @@ show_status() {
         echo "Version: $version"
 
         local uptime
-        uptime=$("${MYSQL_SOFTWARE_DIR}/bin/mysql" -S"$SOCKET" -u"${MYSQL_ADMIN_USER}" -p"${MYSQL_ADMIN_PASSWORD}" -NBe "SELECT FLOOR(@@uptime)/3600) as hours")
+        uptime=$("${MYSQL_SOFTWARE_DIR}/bin/mysql" -S"$SOCKET" -u"${MYSQL_ADMIN_USER}" -p"${MYSQL_ADMIN_PASSWORD}" -NBe "SELECT FLOOR(@@uptime / 3600) AS hours")
         echo "Uptime: ${uptime} hours"
     fi
 
@@ -600,71 +584,47 @@ EOF
 #######################################
 main() {
     local command="${1:-}"
+    shift || true
 
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -i|--interval) CHECK_INTERVAL="${2:?missing interval}"; shift 2 ;;
+            -t|--timeout) CHECK_TIMEOUT="${2:?missing timeout}"; shift 2 ;;
+            -a|--attempts) MAX_RESTART_ATTEMPTS="${2:?missing attempts}"; shift 2 ;;
+            --enable-alert) ENABLE_ALERT=true; shift ;;
+            --vip) VIRTUAL_IP="${2:?missing VIP}"; ENABLE_HA_AUTO_SWITCH=true; shift 2 ;;
+            -h|--help) show_usage; return 0 ;;
+            *) log_error "Unknown option: $1"; show_usage; return 1 ;;
+        esac
+    done
+
+    case "$command" in
+        -h|--help|help|"") show_usage; return 0 ;;
+    esac
+
+    [[ "$MYSQL_PORT" =~ ^[0-9]+$ ]] && (( MYSQL_PORT >= 1 && MYSQL_PORT <= 65535 )) || { log_error "Invalid MySQL port: $MYSQL_PORT"; return 1; }
+    if [[ "$command" != "stop" ]]; then
+        [[ -n "$MYSQL_ADMIN_PASSWORD" ]] || { log_error "Set MYSQL_ADMIN_PASSWORD through a secure configuration file or environment"; return 1; }
+    fi
     init
 
     case "$command" in
-        start)
-            log_info "Starting MySQL health monitor..."
-            monitor_loop
-            ;;
+        start) log_info "Starting MySQL health monitor..."; monitor_loop ;;
         stop)
             log_info "Stopping MySQL health monitor..."
             if [[ -f "$LOCK_FILE" ]]; then
-                kill $(cat "$LOCK_FILE") 2>/dev/null || true
+                local monitor_pid
+                monitor_pid=$(<"$LOCK_FILE")
+                [[ "$monitor_pid" =~ ^[0-9]+$ ]] && kill "$monitor_pid" 2>/dev/null || true
                 rm -f "$LOCK_FILE"
             fi
             log_info "Monitor stopped"
             ;;
-        status)
-            show_status
-            ;;
-        check)
-            run_check
-            ;;
-        heal)
-            self_heal
-            ;;
-        -h|--help|help)
-            show_usage
-            ;;
-        "")
-            show_usage
-            ;;
-        *)
-            # 解析选项
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    -i|--interval)
-                        CHECK_INTERVAL="$2"
-                        shift 2
-                        ;;
-                    -t|--timeout)
-                        CHECK_TIMEOUT="$2"
-                        shift 2
-                        ;;
-                    -a|--attempts)
-                        MAX_RESTART_ATTEMPTS="$2"
-                        shift 2
-                        ;;
-                    --enable-alert)
-                        ENABLE_ALERT=true
-                        shift
-                        ;;
-                    --vip)
-                        VIRTUAL_IP="$2"
-                        ENABLE_HA_AUTO_SWITCH=true
-                        shift 2
-                        ;;
-                    *)
-                        shift
-                        ;;
-                esac
-            done
-
-            # 默认执行状态检查
-            show_status
-            ;;
+        status) show_status ;;
+        check) run_check ;;
+        heal) self_heal ;;
+        -h|--help|help|"") show_usage ;;
+        *) log_error "Unknown command: $command"; show_usage; return 1 ;;
     esac
 }
 

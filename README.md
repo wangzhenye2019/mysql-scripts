@@ -1,13 +1,15 @@
 # MySQL 自动化运维脚本集
 
-[![MySQL Version](https://img.shields.io/badge/MySQL-8.0%2B%20%7C%205.7+-blue.svg)](https://dev.mysql.com/doc/refman/8.0/en/)
+[![MySQL Version](https://img.shields.io/badge/MySQL-8.4%20LTS-blue.svg)](https://dev.mysql.com/doc/refman/8.4/en/)
 [![Platform](https://img.shields.io/badge/Platform-Linux-red.svg)](https://www.redhat.com/en/technologies/linux-systems/enterprise-linux)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/wangzhenye2019/mysql-scripts?style=social)](https://github.com/wangzhenye2019/mysql-scripts)
 [![Auto-Deployment](https://img.shields.io/badge/Type-Binary%20Installation-orange.svg)](#快速开始)
 [![Security](https://img.shields.io/badge/Security-Production%20Ready-red.svg)](#安全警告)
 
-> 生产级 MySQL 自动化部署、高可用与备份恢复解决方案
+> 面向 **MySQL 8.4 LTS** 的自动化部署、复制、备份恢复与健康检查脚本。
+>
+> **重要说明：** 本仓库的单实例、异步复制、备份恢复和健康监控脚本已完成 MySQL 8.4 安全适配；MGR、Keepalived 与 MHA 脚本尚未经过同等强度的生产验证，部署前必须完成隔离环境演练。
 > 
 > 源项目: [dbops/mysql_ansible](https://github.com/yml/workspace/01_Projects/dbops)
 
@@ -44,7 +46,7 @@
 
 ```bash
 git clone git@github.com:wangzhenye2019/mysql-scripts.git
-cd mysql-scripts/scripts
+cd mysql-scripts
 ```
 
 ### 2. 设置权限
@@ -65,11 +67,13 @@ chmod +x *.sh
 ### 4. 执行部署
 
 ```bash
-# 单节点安装（默认参数）
-./mysql_install_single.sh
+# 单节点安装：必须通过环境变量或权限为 0600 的配置文件提供强密码
+sudo MYSQL_ADMIN_PASSWORD='请替换为强密码' ./mysql_install_single.sh
 
-# 指定版本、端口、数据库类型
-./mysql_install_single.sh -v 8.4.6 -p 3306 -t greatsql
+# 指定版本、端口、数据库类型，并校验已下载二进制的 SHA-256
+sudo MYSQL_ADMIN_PASSWORD='请替换为强密码' \
+  MYSQL_PACKAGE_SHA256='官方发布的 SHA-256 值' \
+  ./mysql_install_single.sh -v 8.4.6 -p 3306 -t mysql
 
 # 服务器规格自动匹配
 ./mysql_install_single.sh -s 8c16g   # 自动配置 Buffer Pool
@@ -85,7 +89,7 @@ chmod +x *.sh
 |------|--------|------|----------|
 | `-v, --version` | `8.4.6` | MySQL 版本 | 生产环境锁定小版本 |
 | `-p, --port` | `3306` | 服务端口 | 多实例时递增 |
-| `-t, --type` | `mysql` | 数据库类型 | 支持 mysql/percona/greatsql |
+| `-t, --type` | `mysql` | 数据库类型 | MySQL 8.4 已验证；Percona/GreatSQL 需按其二进制包与参数单独验证 |
 | `-s, --specs` | `auto` | 服务器规格 | auto/4c8g/8c16g/16c32g |
 
 ### 高级参数
@@ -93,7 +97,7 @@ chmod +x *.sh
 | 变量 | 默认值 | 说明 | 调优原理 |
 |------|--------|------|----------|
 | `MYSQL_ADMIN_USER` | `admin` | 管理员账户 | 建议禁用 root 远程登录 |
-| `MYSQL_ADMIN_PASSWORD` | `Dbops@8888` | 管理员密码 | **生产环境必须修改** |
+| `MYSQL_ADMIN_PASSWORD` | 无默认值 | 管理员密码 | **必须通过环境变量或权限为 0600 的配置文件提供** |
 | `MYSQL_DATA_DIR_BASE` | `/database/mysql` | 数据目录 | 建议独立磁盘/挂载点 |
 | `innodb_buffer_pool_size` | **自动计算** | 缓冲池大小 | 建议为可用内存的 70-80% |
 | `max_connections` | **自动计算** | 最大连接数 | 基于服务器规格动态调整 |
@@ -138,10 +142,10 @@ Buffer_Pool=$((Available_Mem * 7 / 10))  # 取 70%
 
 ### 3. 安全加固项
 
-- **密码复杂度**: 至少 8 位，含大小写+数字+特殊字符
-- **权限最小化**: 禁止 root 远程登录，使用 admin 日常运维
-- **审计日志**: 开启 `general_log` + `audit_log` 插件
-- **网络隔离**: 仅监听内网 IP，生产环境禁用公网端口
+- **凭据管理**: 脚本不再提供默认密码。请使用受限环境变量、受限配置文件或企业密钥管理服务，且避免把密码写入 Shell 历史、Git、进程参数和日志。
+- **权限最小化**: 禁止 root 远程登录；备份账户仅创建在 `localhost`，日常运维账户需按来源网段和权限单独收敛。
+- **认证插件**: MySQL 8.4 默认使用 `caching_sha2_password`，不再主动启用已默认关闭的 `mysql_native_password`。
+- **网络隔离**: 仅监听内网 IP，生产环境禁用公网端口；复制链路应配置 TLS 证书，而非只依赖 `GET_SOURCE_PUBLIC_KEY`。
 
 ### 4. 性能优化建议
 
@@ -230,13 +234,19 @@ Buffer_Pool=$((Available_Mem * 7 / 10))  # 取 70%
 ./mysql_install_single.sh -v 8.4.6 -p 3306 -t greatsql -s 8c16g
 ```
 
-### 2. 主从复制安装
+### 2. Source-Replica 复制安装
 
 ```bash
-# 配置主从（环境变量方式）
-export SLAVE_IPS=("192.168.199.132" "192.168.199.133")
+# 先以 XtraBackup 或 CLONE 对所有副本完成一致性置备，再显式确认。
+export MASTER_IP="192.168.199.131"
+export SLAVE_IPS_CSV="192.168.199.132,192.168.199.133"
+export MYSQL_ADMIN_PASSWORD='请替换为强密码'
+export MYSQL_RPLE_PASSWORD='请替换为复制强密码'
+export REPLICAS_PROVISIONED=true
 ./mysql_install_master_slave.sh
 ```
+
+该脚本使用 MySQL 8.4 的 `CHANGE REPLICATION SOURCE TO`、`START REPLICA` 与 GTID 自动定位；它不再通过 `rsync` 复制正在运行的数据目录。
 
 ### 3. MGR 集群安装
 
@@ -263,14 +273,11 @@ export BACKUP_IP=192.168.199.132
 # 执行全量备份
 ./mysql_backup_restore.sh backup
 
-# 增量备份（基于上次全量）
-./mysql_backup_restore.sh backup --incremental
-
 # 查看备份列表
 ./mysql_backup_restore.sh list
 
-# 恢复数据
-./mysql_backup_restore.sh restore /backup/full/backup.xbstream
+# 恢复数据（破坏性操作；必须显式确认）
+./mysql_backup_restore.sh restore --yes /backup/full/backup.xbstream
 
 # 设置定时任务（每日 02:00 全量）
 ./mysql_backup_restore.sh cron --time "0 2 * * *"
@@ -318,14 +325,14 @@ scripts/
 | 组件 | 要求 | 说明 |
 |------|------|------|
 | OS | RHEL/CentOS/Rocky 7+ / Ubuntu 18.04+ | 建议使用 Rocky 9 |
-| MySQL | 5.7+ / 8.0+ / GreatSQL | 推荐 8.0.35+ |
+| MySQL | **8.4 LTS** | 当前适配和回归检查目标；5.7/8.0 与 GreatSQL/Percona 需另行兼容性测试 |
 | SSH | 免密登录 | 多节点环境必须 |
 | 权限 | root | 需要安装系统包 |
 
 ### 依赖软件
 
 - **MySQL 二进制包**: 下载到 `~/downloads/` 目录
-- **Xtrabackup**: 备份脚本依赖（Percona XtraBackup）
+- **Percona XtraBackup**: 8.4 数据库使用 `percona-xtrabackup-84`；工具主版本须与数据库创建版本匹配。
 - **Keepalived**: HA 脚本依赖
 - **MHA Manager**: MHA 脚本依赖
 
@@ -361,7 +368,7 @@ tail -f /database/mysql/data/error.log
 
 ```bash
 # 查看复制状态
-mysql -e "SHOW SLAVE STATUS\G"
+mysql -e "SHOW REPLICA STATUS\G"
 
 # 检查 GTID 同步
 mysql -e "SELECT * FROM performance_schema.replication_group_member_stats\G"
@@ -405,7 +412,9 @@ tail -f /var/log/keepalived/check_mysql.log
 
 ## 相关文档
 
-- [MySQL 官方文档](https://dev.mysql.com/doc/refman/8.0/en/)
+- [MySQL 8.4 官方文档](https://dev.mysql.com/doc/refman/8.4/en/)
+- [MySQL 8.4 Source-Replica 复制](https://dev.mysql.com/doc/refman/8.4/en/replication.html)
+- [Percona XtraBackup 8.4 文档](https://docs.percona.com/percona-xtrabackup/8.4/)
 - [GreatSQL 文档](https://docs.greatdb.com/)
 - [Percona XtraBackup](https://www.percona.com/software/percona-xtrabackup)
 - [MHA Manager](https://github.com/yoshinorim/mha4mysql-manager)
