@@ -62,3 +62,22 @@ MySQL Router 通过 `--bootstrap` 从集群 metadata 获取路由配置，并在
 ---
 
 **作者：Manus AI**
+
+## 4. 自动化巡检、监控与故障演练
+
+新增的巡检脚本默认只读，不会启动复制、修改只读状态、重启服务或触发故障切换。它们使用统一的退出码：`0` 表示健康，`1` 表示降级但仍具备主要服务能力，`2` 表示不安全或关键异常，`3` 表示配置、依赖或管理接口不可用。外部监控平台应采集退出码和 JSON 输出，而不是仅依据进程存活判断数据库健康。
+
+| 架构 | 巡检入口 | 覆盖范围 | 定时安装 |
+|---|---|---|---|
+| MySQL 5.7.44 | `mysql57_orchestrator_ha/06_monitor_health.sh --config … --json` | 半同步状态、确认副本数、GTID/durability、复制线程、Orchestrator API、VIP 与读写角色 | 加 `--install-systemd --interval 30` |
+| MySQL 8.4 | `mysql84_innodb_cluster/06_monitor_cluster.sh --config … --json` | AdminAPI 集群状态、ONLINE 成员、PRIMARY 唯一性、Router service 与 RW/RO listener | 加 `--install-systemd --interval 30` |
+
+5.7 的监控结果若显示半同步回退或确认副本数不足，应将其视为写入安全事件，而不只是复制告警。8.4 的监控脚本以 AdminAPI metadata 为准，不直接手工检查或启动 Group Replication。两者均可通过本机 systemd timer 以秒级周期运行；它们不会通过 Manus 定时任务执行。
+
+故障演练脚本将危险操作与预检分离。`07_drill_orchestrator_failover.sh --mode preflight` 和 `07_drill_mgr_failover.sh --mode preflight` 只收集基线和阻断不合格演练。任何实际切换都要求 `--apply`、变更单号及受控配置；5.7 的注入模式还要求 `--acknowledge-production-impact`。本仓库不内置 `kill -9`、网络断开或数据目录复制等不安全动作。故障注入必须由运行环境提供、审计并显式配置为 `DRILL_FAULT_INJECTION_COMMAND`，例如 PDU、虚拟化平台或安全组隔离操作。
+
+> **演练成功的最低标准：** 只有一个可写主库；监控状态符合预期；应用入口已恢复；证据目录保留了演练前后主库、Router/Orchestrator 状态与命令日志；故障成员只通过定义的重新置备或 AdminAPI rejoin 流程回归。
+
+---
+
+**作者：Manus AI**
